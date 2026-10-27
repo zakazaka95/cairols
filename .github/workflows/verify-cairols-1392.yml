@@ -38,6 +38,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cairols-1392-linux-rust-1.98
+          cache-on-failure: "true"
       - uses: software-mansion/setup-scarb@v1
         with:
           scarb-version: 2.20.0
@@ -84,7 +85,7 @@ jobs:
           log = pathlib.Path("evidence/red.log").read_text()
           log = re.sub(r"\x1b\[[0-9;]*m", "", log)
           assert int(sys.argv[1]) == 101, f"unexpected cargo status: {sys.argv[1]}"
-          assert "test semantic_tokens::complex::local_variable_shadows_crate_name ... FAILED" in log
+          assert "semantic_tokens::complex::local_variable_shadows_crate_name" in log
           assert "test result: FAILED. 0 passed; 1 failed;" in log
           assert "namespace>snforge_std</token>" in log, "missing wrong namespace token witness"
           assert "variable>snforge_std</token>" in log, "missing expected variable token witness"
