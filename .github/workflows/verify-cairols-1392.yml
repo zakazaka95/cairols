@@ -1,0 +1,121 @@
+name: Verify CairoLS 1392 fixture
+
+on:
+  push:
+    branches:
+      - verify/cairols-1392-linux-oct27
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-cairols-1392-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    if: github.repository == 'zakazaka95/cairols' && github.ref == 'refs/heads/verify/cairols-1392-linux-oct27'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TERM_COLOR: never
+      INSTA_UPDATE: "no"
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cairols-1392-linux-rust-1.98
+      - uses: software-mansion/setup-scarb@v1
+        with:
+          scarb-version: 2.20.0
+          cache: false
+      - name: Record exact inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          {
+            git rev-parse HEAD
+            rustc --version --verbose
+            cargo --version
+            scarb --version
+            git hash-object tests/e2e/semantic_tokens/complex.rs
+            git diff 332767cdc801a10d5342c224eb9ce65789dbc40b -- tests/e2e/semantic_tokens/complex.rs
+          } | tee evidence/inputs.log
+          git diff --exit-code 332767cdc801a10d5342c224eb9ce65789dbc40b -- Cargo.lock Cargo.toml .tool-versions src/ide/semantic_highlighting/token_kind.rs
+      - name: Green semantic-token complex module
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --all-features --test e2e semantic_tokens::complex -- --test-threads=1 --nocapture 2>&1 | tee evidence/green.log
+          grep -F 'test result: ok. 12 passed; 0 failed;' evidence/green.log
+      - name: Negative control and restored green
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file=src/ide/semantic_highlighting/token_kind.rs
+          cp "$source_file" "$RUNNER_TEMP/token_kind.green.rs"
+          trap 'cp "$RUNNER_TEMP/token_kind.green.rs" "$source_file"' EXIT
+          git show 332767cdc801a10d5342c224eb9ce65789dbc40b^:"$source_file" > "$source_file"
+          git diff -- "$source_file" | tee evidence/red-control.diff
+          cargo test --locked --all-features --test e2e --no-run 2>&1 | tee evidence/red-build.log
+          set +e
+          cargo test --locked --all-features --test e2e semantic_tokens::complex::local_variable_shadows_crate_name -- --exact --test-threads=1 --nocapture 2>&1 | tee evidence/red.log
+          red_status=${PIPESTATUS[0]}
+          set -e
+          python3 - "$red_status" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          log = pathlib.Path("evidence/red.log").read_text()
+          log = re.sub(r"\x1b\[[0-9;]*m", "", log)
+          assert int(sys.argv[1]) == 101, f"unexpected cargo status: {sys.argv[1]}"
+          assert "test semantic_tokens::complex::local_variable_shadows_crate_name ... FAILED" in log
+          assert "test result: FAILED. 0 passed; 1 failed;" in log
+          assert "namespace>snforge_std</token>" in log, "missing wrong namespace token witness"
+          assert "variable>snforge_std</token>" in log, "missing expected variable token witness"
+          assert "snapshot assertion" in log.lower(), "failure was not the expected snapshot assertion"
+          print("Negative control: compiled successfully and failed the intended token snapshot.")
+          PY
+          cp "$RUNNER_TEMP/token_kind.green.rs" "$source_file"
+          trap - EXIT
+          cargo test --locked --all-features --test e2e semantic_tokens::complex -- --test-threads=1 --nocapture 2>&1 | tee evidence/restored-green.log
+          grep -F 'test result: ok. 12 passed; 0 failed;' evidence/restored-green.log
+          git diff --exit-code -- Cargo.lock Cargo.toml .tool-versions src/ide/semantic_highlighting/token_kind.rs tests/e2e/semantic_tokens/complex.rs
+      - name: Scoped strict Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --all-features --all-targets -p cairo-language-server -- -D warnings 2>&1 | tee evidence/clippy.log
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-27
+          components: rustfmt
+      - name: Repository format and diff checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +nightly-2026-07-27 fmt --all --check 2>&1 | tee evidence/format.log
+          git diff --check
+          git diff --exit-code -- Cargo.lock Cargo.toml .tool-versions src/ide/semantic_highlighting/token_kind.rs tests/e2e/semantic_tokens/complex.rs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: cairols-1392-linux-evidence
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 7
